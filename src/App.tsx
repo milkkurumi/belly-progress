@@ -176,7 +176,7 @@ function ShootView({
       } catch {
         if (!cancelled) {
           setCamError(
-            'ブラウザ内でカメラを起動できませんでした（HTTPS環境が必要です）。下の「写真を撮る／選ぶ」から追加できます。',
+            'ブラウザ内でカメラを起動できませんでした。下の「ギャラリー／カメラアプリから選ぶ」から追加できます。',
           )
         }
       }
@@ -211,11 +211,13 @@ function ShootView({
   }
 
   const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const f = e.target.files?.[0]
+    const files = Array.from(e.target.files ?? [])
     e.target.value = ''
-    if (!f) return
-    await addPhoto(f, f.lastModified || Date.now())
-    notify('追加しました')
+    if (files.length === 0) return
+    for (const f of files) {
+      await addPhoto(f, f.lastModified || Date.now())
+    }
+    notify(files.length > 1 ? `${files.length}枚追加しました` : '追加しました')
     await onChanged()
   }
 
@@ -264,9 +266,9 @@ function ShootView({
         ● 撮影する
       </button>
       <button className="sub-btn" onClick={() => fileRef.current?.click()}>
-        写真を撮る／選ぶ（カメラアプリ・ギャラリー）
+        ギャラリー／カメラアプリから選ぶ（複数OK）
       </button>
-      <input ref={fileRef} type="file" accept="image/*" hidden onChange={onFile} />
+      <input ref={fileRef} type="file" accept="image/*" multiple hidden onChange={onFile} />
 
       {last && (
         <p className="note">
