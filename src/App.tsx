@@ -434,7 +434,45 @@ function CompareView({ photos, notify }: { photos: PhotoItem[]; notify: (m: stri
   const [flickOn, setFlickOn] = useState(true)
   const [baseNat, setBaseNat] = useState<{ w: number; h: number } | null>(null)
   const stageRef = useRef<HTMLDivElement | null>(null)
-  const dragRef = useRef({ active: false, startX: 0, startY: 0, tx: 0, ty: 0 })
+  const dragRef = useRef({ startX: 0, startY: 0, tx: 0, ty: 0 })
+  const pointersRef = useRef(new Map<number, { x: number; y: number }>())
+  const gestureRef = useRef<{ dist: number; angle: number; midX: number; midY: number } | null>(null)
+  const scaleRef = useRef(1)
+  const rotRef = useRef(0)
+  const txRef = useRef(0)
+  const tyRef = useRef(0)
+
+  useEffect(() => {
+    scaleRef.current = scale
+  }, [scale])
+  useEffect(() => {
+    rotRef.current = rot
+  }, [rot])
+  useEffect(() => {
+    txRef.current = tx
+  }, [tx])
+  useEffect(() => {
+    tyRef.current = ty
+  }, [ty])
+
+  const applyPos = (x: number, y: number) => {
+    txRef.current = x
+    tyRef.current = y
+    setTx(x)
+    setTy(y)
+  }
+  const applyScale = (s: number) => {
+    const v = Math.min(4, Math.max(0.3, s))
+    scaleRef.current = v
+    setScale(v)
+  }
+  const applyRot = (r: number) => {
+    let v = r % 360
+    if (v > 180) v -= 360
+    if (v < -180) v += 360
+    rotRef.current = v
+    setRot(v)
+  }
 
   useEffect(() => {
     if (photos.length === 0) return
@@ -458,25 +496,62 @@ function CompareView({ photos, notify }: { photos: PhotoItem[]; notify: (m: stri
 
   const effOpacity = mode === 'overlay' ? opacity : mode === 'flicker' ? (flickOn ? 1 : 0) : 1
 
+  const twoPoints = () => {
+    const pts = [...pointersRef.current.values()]
+    if (pts.length < 2) return null
+    const [a, b] = pts
+    return {
+      dist: Math.hypot(b.x - a.x, b.y - a.y),
+      angle: (Math.atan2(b.y - a.y, b.x - a.x) * 180) / Math.PI,
+      midX: (a.x + b.x) / 2,
+      midY: (a.y + b.y) / 2,
+    }
+  }
+
   const onPointerDown = (e: React.PointerEvent) => {
-    dragRef.current = { active: true, startX: e.clientX, startY: e.clientY, tx, ty }
-    ;(e.target as HTMLElement).setPointerCapture(e.pointerId)
+    ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
+    pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY })
+    if (pointersRef.current.size === 1) {
+      dragRef.current = { startX: e.clientX, startY: e.clientY, tx: txRef.current, ty: tyRef.current }
+    } else if (pointersRef.current.size === 2) {
+      gestureRef.current = twoPoints()
+    }
   }
+
   const onPointerMove = (e: React.PointerEvent) => {
-    const d = dragRef.current
-    if (!d.active) return
-    setTx(d.tx + (e.clientX - d.startX))
-    setTy(d.ty + (e.clientY - d.startY))
+    if (!pointersRef.current.has(e.pointerId)) return
+    pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY })
+    if (pointersRef.current.size === 1) {
+      const d = dragRef.current
+      applyPos(d.tx + (e.clientX - d.startX), d.ty + (e.clientY - d.startY))
+    } else if (pointersRef.current.size === 2) {
+      const now = twoPoints()
+      const prev = gestureRef.current
+      if (now && prev && prev.dist > 0) {
+        applyScale(scaleRef.current * (now.dist / prev.dist))
+        let dAng = now.angle - prev.angle
+        if (dAng > 180) dAng -= 360
+        if (dAng < -180) dAng += 360
+        applyRot(rotRef.current + dAng)
+        applyPos(txRef.current + (now.midX - prev.midX), tyRef.current + (now.midY - prev.midY))
+      }
+      gestureRef.current = now
+    }
   }
-  const endDrag = () => {
-    dragRef.current.active = false
+
+  const endPointer = (e: React.PointerEvent) => {
+    pointersRef.current.delete(e.pointerId)
+    if (pointersRef.current.size === 1) {
+      const [p] = [...pointersRef.current.values()]
+      dragRef.current = { startX: p.x, startY: p.y, tx: txRef.current, ty: tyRef.current }
+    }
+    if (pointersRef.current.size < 2) gestureRef.current = null
   }
 
   const resetTransform = () => {
-    setScale(1)
-    setRot(0)
-    setTx(0)
-    setTy(0)
+    applyScale(1)
+    applyRot(0)
+    applyPos(0, 0)
   }
 
   const exportPNG = async () => {
@@ -569,14 +644,17 @@ function CompareView({ photos, notify }: { photos: PhotoItem[]; notify: (m: stri
           }}
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
-          onPointerUp={endDrag}
-          onPointerCancel={endDrag}
+          onPointerUp={endPointer}
+          onPointerCancel={endPointer}
+          onDoubleClick={resetTransform}
         >
           <img src={over.url} alt="" className="stage-img" draggable={false} />
         </div>
         {mode === 'wipe' && <div className="wipe-line" style={{ left: `${wipe}%` }} />}
       </div>
-      <p className="note">上の写真はドラッグで動かせます。おへそや腰の位置など、目印で合わせてください。</p>
+      <p className="note">
+        1本指でドラッグ＝移動、2本指＝広げる・つまむで拡大縮小、そのままひねると回転。ダブルタップでリセット。おへそや腰の位置など、目印で合わせてください。
+      </p>
 
       <div className="chips">
         <button className={mode === 'overlay' ? 'chip active' : 'chip'} onClick={() => setMode('overlay')}>
