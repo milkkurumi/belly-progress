@@ -37,3 +37,11 @@ export async function deletePhoto(id: string): Promise<void> {
   const d = await db()
   await d.delete('photos', id)
 }
+
+export async function updatePhotoTakenAt(id: string, takenAt: number): Promise<void> {
+  const d = await db()
+  const rec = (await d.get('photos', id)) as PhotoRecord | undefined
+  if (!rec) return
+  rec.takenAt = takenAt
+  await d.put('photos', rec)
+}
