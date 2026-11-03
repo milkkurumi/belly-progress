@@ -192,17 +192,23 @@ function ShootView({
   const [camError, setCamError] = useState<string | null>(null)
   const [ghostId, setGhostId] = useState<string>('') // '' = 前回（最新）
   const [ghostOpacity, setGhostOpacity] = useState(0.45)
+  const [facing, setFacing] = useState<'environment' | 'user'>('environment')
+  const [timerSec, setTimerSec] = useState(0)
+  const [countdown, setCountdown] = useState<number | null>(null)
+  const [showGuide, setShowGuide] = useState(false)
+  const [lastShot, setLastShot] = useState<{ id: string; url: string } | null>(null)
 
   const ghost = ghostId ? photos.find((p) => p.id === ghostId) : photos[photos.length - 1]
   const last = photos[photos.length - 1]
 
   useEffect(() => {
     let cancelled = false
+    setCamError(null)
     async function start() {
       try {
         if (!navigator.mediaDevices?.getUserMedia) throw new Error('unsupported')
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: { ideal: 'environment' } },
+          video: { facingMode: { ideal: facing } },
           audio: false,
         })
         if (cancelled) {
@@ -225,9 +231,9 @@ function ShootView({
       streamRef.current?.getTracks().forEach((t) => t.stop())
       streamRef.current = null
     }
-  }, [])
+  }, [facing])
 
-  const capture = () => {
+  const doCapture = () => {
     const v = videoRef.current
     if (!v || v.videoWidth === 0) return
     const c = document.createElement('canvas')
@@ -235,19 +241,55 @@ function ShootView({
     c.height = v.videoHeight
     const ctx = c.getContext('2d')
     if (!ctx) return
+    if (facing === 'user') {
+      // 自撮りプレビュー（鏡像）に合わせて保存も左右反転する
+      ctx.translate(c.width, 0)
+      ctx.scale(-1, 1)
+    }
     ctx.drawImage(v, 0, 0)
     c.toBlob(
       async (b) => {
         if (!b) return
         const ts = Date.now()
-        await addPhoto(b, ts)
+        const rec = await addPhoto(b, ts)
         if (settings.autoSaveLocal) downloadPhoto(b, ts)
+        setLastShot((prev) => {
+          if (prev) URL.revokeObjectURL(prev.url)
+          return { id: rec.id, url: URL.createObjectURL(b) }
+        })
         notify('保存しました')
         await onChanged()
       },
       'image/jpeg',
       0.92,
     )
+  }
+
+  const capture = () => {
+    if (countdown !== null) return
+    if (timerSec > 0) setCountdown(timerSec)
+    else doCapture()
+  }
+
+  useEffect(() => {
+    if (countdown === null) return
+    if (countdown === 0) {
+      setCountdown(null)
+      doCapture()
+      return
+    }
+    const id = window.setTimeout(() => setCountdown((c) => (c !== null ? c - 1 : null)), 1000)
+    return () => window.clearTimeout(id)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [countdown])
+
+  const discardLastShot = async () => {
+    if (!lastShot) return
+    await deletePhoto(lastShot.id)
+    URL.revokeObjectURL(lastShot.url)
+    setLastShot(null)
+    notify('削除しました。撮り直してください')
+    await onChanged()
   }
 
   const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -263,10 +305,55 @@ function ShootView({
 
   return (
     <section>
+      {photos.length === 0 && (
+        <div className="card guide-card">
+          <h2>使い方</h2>
+          <ol className="guide-steps">
+            <li>同じ場所で、横向き（横からの姿）で撮ると比べやすくなります</li>
+            <li>2回目からは、前回の写真が半透明に重なって見えます。位置を合わせて撮ってください</li>
+            <li>写真はこのスマホの中だけに保存されます（外部に送られません）</li>
+          </ol>
+        </div>
+      )}
+
       <div className="viewfinder">
-        <video ref={videoRef} autoPlay muted playsInline className="vf-video" />
+        <video
+          ref={videoRef}
+          autoPlay
+          muted
+          playsInline
+          className="vf-video"
+          style={facing === 'user' ? { transform: 'scaleX(-1)' } : undefined}
+        />
         {ghost && <img src={ghost.url} alt="" className="vf-ghost" style={{ opacity: ghostOpacity }} />}
+        {showGuide && (
+          <div className="vf-grid">
+            <span className="gl-v" style={{ left: '33.33%' }} />
+            <span className="gl-v" style={{ left: '66.66%' }} />
+            <span className="gl-h" style={{ top: '33.33%' }} />
+            <span className="gl-h" style={{ top: '66.66%' }} />
+          </div>
+        )}
+        {countdown !== null && countdown > 0 && <div className="vf-count">{countdown}</div>}
         {camError && <div className="vf-error">{camError}</div>}
+      </div>
+
+      <div className="chips vf-tools">
+        <button className="chip" onClick={() => setFacing((f) => (f === 'environment' ? 'user' : 'environment'))}>
+          {facing === 'environment' ? '自撮りカメラに切替' : '外カメラに切替'}
+        </button>
+        <button className={showGuide ? 'chip active' : 'chip'} onClick={() => setShowGuide((s) => !s)}>
+          ガイド線
+        </button>
+        <button className={timerSec === 0 ? 'chip active' : 'chip'} onClick={() => setTimerSec(0)}>
+          タイマーなし
+        </button>
+        <button className={timerSec === 3 ? 'chip active' : 'chip'} onClick={() => setTimerSec(3)}>
+          3秒
+        </button>
+        <button className={timerSec === 10 ? 'chip active' : 'chip'} onClick={() => setTimerSec(10)}>
+          10秒
+        </button>
       </div>
 
       {ghost ? (
@@ -302,9 +389,20 @@ function ShootView({
         <p className="note">まだ写真がありません。1枚目を撮ると、次回からゴーストで重ねて撮れます。</p>
       )}
 
-      <button className="shutter" onClick={capture} disabled={!!camError}>
-        ● 撮影する
+      <button className="shutter" onClick={capture} disabled={!!camError || countdown !== null}>
+        {countdown !== null ? `${countdown}…` : '● 撮影する'}
       </button>
+
+      {lastShot && (
+        <div className="lastshot">
+          <img src={lastShot.url} alt="今撮った写真" />
+          <span>今撮った写真</span>
+          <button className="mini-btn" onClick={discardLastShot}>
+            削除して撮り直す
+          </button>
+        </div>
+      )}
+
       <button className="sub-btn" onClick={() => fileRef.current?.click()}>
         ギャラリー／カメラアプリから選ぶ（複数OK）
       </button>
@@ -708,10 +806,13 @@ function ListView({
       <h2 className="list-title">写真一覧（{photos.length}枚）</h2>
       {photos.length === 0 && <p className="note">まだ写真がありません。</p>}
       <div className="grid">
-        {photos.map((p, i) => {
-          const g = gestationalLabel(p.takenAt, settings.dueDate)
-          const prev = photos[i - 1]
-          return (
+        {photos
+          .map((p, i) => ({ p, i }))
+          .reverse()
+          .map(({ p, i }) => {
+            const g = gestationalLabel(p.takenAt, settings.dueDate)
+            const prev = photos[i - 1]
+            return (
             <figure key={p.id} className="cell">
               <img src={p.url} alt={fmtDate(p.takenAt)} />
               <figcaption>
