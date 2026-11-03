@@ -1,0 +1,609 @@
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { addPhoto, deletePhoto, listPhotos, type PhotoRecord } from './lib/db'
+
+export interface PhotoItem extends PhotoRecord {
+  url: string
+}
+
+type Tab = 'shoot' | 'compare' | 'list'
+type Cadence = 'weekly' | 'monthly' | 'free'
+
+interface Settings {
+  cadence: Cadence
+  dueDate: string // 'YYYY-MM-DD' or ''
+}
+
+const SETTINGS_KEY = 'belly-progress-settings'
+
+function loadSettings(): Settings {
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY)
+    if (raw) {
+      const p = JSON.parse(raw) as Partial<Settings>
+      return {
+        cadence: p.cadence === 'monthly' || p.cadence === 'free' ? p.cadence : 'weekly',
+        dueDate: typeof p.dueDate === 'string' ? p.dueDate : '',
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return { cadence: 'weekly', dueDate: '' }
+}
+
+const DAY = 86400000
+
+function fmtDate(ts: number): string {
+  const d = new Date(ts)
+  return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`
+}
+
+function daysSince(from: number, to: number): number {
+  return Math.round((to - from) / DAY)
+}
+
+/** 出産予定日から逆算した妊娠週数ラベル（例: 18週3日） */
+function gestationalLabel(takenAt: number, dueDate: string): string | null {
+  if (!dueDate) return null
+  const due = new Date(`${dueDate}T00:00:00`).getTime()
+  if (Number.isNaN(due)) return null
+  const gestDays = 280 - Math.round((due - takenAt) / DAY)
+  if (gestDays < 0 || gestDays > 300) return null
+  return `${Math.floor(gestDays / 7)}週${gestDays % 7}日`
+}
+
+function nextDueAt(last: number, cadence: Cadence): number | null {
+  if (cadence === 'free') return null
+  const d = new Date(last)
+  if (cadence === 'weekly') d.setDate(d.getDate() + 7)
+  else d.setMonth(d.getMonth() + 1)
+  return d.getTime()
+}
+
+function loadImage(url: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image()
+    img.onload = () => resolve(img)
+    img.onerror = reject
+    img.src = url
+  })
+}
+
+// ---------- App ----------
+
+export default function App() {
+  const [photos, setPhotos] = useState<PhotoItem[]>([])
+  const [tab, setTab] = useState<Tab>('shoot')
+  const [settings, setSettings] = useState<Settings>(loadSettings)
+  const [toast, setToast] = useState('')
+  const toastTimer = useRef<number | null>(null)
+  const itemsRef = useRef<PhotoItem[]>([])
+
+  const reload = useCallback(async () => {
+    const recs = await listPhotos()
+    const items = recs.map((r) => ({ ...r, url: URL.createObjectURL(r.blob) }))
+    itemsRef.current.forEach((p) => URL.revokeObjectURL(p.url))
+    itemsRef.current = items
+    setPhotos(items)
+  }, [])
+
+  useEffect(() => {
+    void reload()
+  }, [reload])
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings))
+    } catch {
+      // ignore
+    }
+  }, [settings])
+
+  const notify = useCallback((msg: string) => {
+    setToast(msg)
+    if (toastTimer.current) window.clearTimeout(toastTimer.current)
+    toastTimer.current = window.setTimeout(() => setToast(''), 2600)
+  }, [])
+
+  return (
+    <div className="app">
+      <header className="header">
+        <h1>お腹の経過観察</h1>
+        <p className="header-sub">写真はこの端末の中だけに保存されます</p>
+      </header>
+
+      <main className="main">
+        {tab === 'shoot' && <ShootView photos={photos} onChanged={reload} notify={notify} />}
+        {tab === 'compare' && <CompareView photos={photos} notify={notify} />}
+        {tab === 'list' && (
+          <ListView photos={photos} settings={settings} onSettings={setSettings} onChanged={reload} />
+        )}
+      </main>
+
+      {toast && <div className="toast">{toast}</div>}
+
+      <nav className="tabbar">
+        <button className={tab === 'shoot' ? 'active' : ''} onClick={() => setTab('shoot')}>
+          撮影
+        </button>
+        <button className={tab === 'compare' ? 'active' : ''} onClick={() => setTab('compare')}>
+          比較
+        </button>
+        <button className={tab === 'list' ? 'active' : ''} onClick={() => setTab('list')}>
+          一覧・設定
+        </button>
+      </nav>
+    </div>
+  )
+}
+
+// ---------- 撮影（ゴースト撮影） ----------
+
+function ShootView({
+  photos,
+  onChanged,
+  notify,
+}: {
+  photos: PhotoItem[]
+  onChanged: () => Promise<void>
+  notify: (m: string) => void
+}) {
+  const videoRef = useRef<HTMLVideoElement | null>(null)
+  const streamRef = useRef<MediaStream | null>(null)
+  const fileRef = useRef<HTMLInputElement | null>(null)
+  const [camError, setCamError] = useState<string | null>(null)
+  const [ghostId, setGhostId] = useState<string>('') // '' = 前回（最新）
+  const [ghostOpacity, setGhostOpacity] = useState(0.45)
+
+  const ghost = ghostId ? photos.find((p) => p.id === ghostId) : photos[photos.length - 1]
+  const last = photos[photos.length - 1]
+
+  useEffect(() => {
+    let cancelled = false
+    async function start() {
+      try {
+        if (!navigator.mediaDevices?.getUserMedia) throw new Error('unsupported')
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: 'environment' } },
+          audio: false,
+        })
+        if (cancelled) {
+          stream.getTracks().forEach((t) => t.stop())
+          return
+        }
+        streamRef.current = stream
+        if (videoRef.current) videoRef.current.srcObject = stream
+      } catch {
+        if (!cancelled) {
+          setCamError(
+            'ブラウザ内でカメラを起動できませんでした（HTTPS環境が必要です）。下の「写真を撮る／選ぶ」から追加できます。',
+          )
+        }
+      }
+    }
+    void start()
+    return () => {
+      cancelled = true
+      streamRef.current?.getTracks().forEach((t) => t.stop())
+      streamRef.current = null
+    }
+  }, [])
+
+  const capture = () => {
+    const v = videoRef.current
+    if (!v || v.videoWidth === 0) return
+    const c = document.createElement('canvas')
+    c.width = v.videoWidth
+    c.height = v.videoHeight
+    const ctx = c.getContext('2d')
+    if (!ctx) return
+    ctx.drawImage(v, 0, 0)
+    c.toBlob(
+      async (b) => {
+        if (!b) return
+        await addPhoto(b, Date.now())
+        notify('保存しました')
+        await onChanged()
+      },
+      'image/jpeg',
+      0.92,
+    )
+  }
+
+  const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0]
+    e.target.value = ''
+    if (!f) return
+    await addPhoto(f, f.lastModified || Date.now())
+    notify('追加しました')
+    await onChanged()
+  }
+
+  return (
+    <section>
+      <div className="viewfinder">
+        <video ref={videoRef} autoPlay muted playsInline className="vf-video" />
+        {ghost && <img src={ghost.url} alt="" className="vf-ghost" style={{ opacity: ghostOpacity }} />}
+        {camError && <div className="vf-error">{camError}</div>}
+      </div>
+
+      {ghost ? (
+        <div className="control">
+          <label>
+            ゴーストの濃さ <span>{Math.round(ghostOpacity * 100)}%</span>
+          </label>
+          <input
+            type="range"
+            min={0}
+            max={0.9}
+            step={0.05}
+            value={ghostOpacity}
+            onChange={(e) => setGhostOpacity(Number(e.target.value))}
+          />
+          <label>重ねる写真</label>
+          <div className="chips">
+            <button className={ghostId === '' ? 'chip active' : 'chip'} onClick={() => setGhostId('')}>
+              前回
+            </button>
+            {photos.map((p) => (
+              <button
+                key={p.id}
+                className={ghostId === p.id ? 'chip active' : 'chip'}
+                onClick={() => setGhostId(p.id)}
+              >
+                {fmtDate(p.takenAt)}
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : (
+        <p className="note">まだ写真がありません。1枚目を撮ると、次回からゴーストで重ねて撮れます。</p>
+      )}
+
+      <button className="shutter" onClick={capture} disabled={!!camError}>
+        ● 撮影する
+      </button>
+      <button className="sub-btn" onClick={() => fileRef.current?.click()}>
+        写真を撮る／選ぶ（カメラアプリ・ギャラリー）
+      </button>
+      <input ref={fileRef} type="file" accept="image/*" hidden onChange={onFile} />
+
+      {last && (
+        <p className="note">
+          前回の撮影：{fmtDate(last.takenAt)}（{daysSince(last.takenAt, Date.now())}日前）
+        </p>
+      )}
+    </section>
+  )
+}
+
+// ---------- 比較 ----------
+
+type CompareMode = 'overlay' | 'wipe' | 'flicker'
+
+function CompareView({ photos, notify }: { photos: PhotoItem[]; notify: (m: string) => void }) {
+  const [baseId, setBaseId] = useState<string>('')
+  const [overId, setOverId] = useState<string>('')
+  const [mode, setMode] = useState<CompareMode>('overlay')
+  const [opacity, setOpacity] = useState(0.5)
+  const [wipe, setWipe] = useState(50)
+  const [scale, setScale] = useState(1)
+  const [rot, setRot] = useState(0)
+  const [tx, setTx] = useState(0)
+  const [ty, setTy] = useState(0)
+  const [flickOn, setFlickOn] = useState(true)
+  const [baseNat, setBaseNat] = useState<{ w: number; h: number } | null>(null)
+  const stageRef = useRef<HTMLDivElement | null>(null)
+  const dragRef = useRef({ active: false, startX: 0, startY: 0, tx: 0, ty: 0 })
+
+  useEffect(() => {
+    if (photos.length === 0) return
+    if (!photos.some((p) => p.id === baseId)) setBaseId(photos[0].id)
+    if (!photos.some((p) => p.id === overId)) setOverId(photos[photos.length - 1].id)
+  }, [photos, baseId, overId])
+
+  useEffect(() => {
+    if (mode !== 'flicker') return
+    const id = window.setInterval(() => setFlickOn((v) => !v), 700)
+    return () => window.clearInterval(id)
+  }, [mode])
+
+  const base = photos.find((p) => p.id === baseId)
+  const over = photos.find((p) => p.id === overId)
+
+  if (photos.length < 2) {
+    return <p className="note">比較には写真が2枚以上必要です。撮影タブから写真を増やしてください。</p>
+  }
+  if (!base || !over) return null
+
+  const effOpacity = mode === 'overlay' ? opacity : mode === 'flicker' ? (flickOn ? 1 : 0) : 1
+
+  const onPointerDown = (e: React.PointerEvent) => {
+    dragRef.current = { active: true, startX: e.clientX, startY: e.clientY, tx, ty }
+    ;(e.target as HTMLElement).setPointerCapture(e.pointerId)
+  }
+  const onPointerMove = (e: React.PointerEvent) => {
+    const d = dragRef.current
+    if (!d.active) return
+    setTx(d.tx + (e.clientX - d.startX))
+    setTy(d.ty + (e.clientY - d.startY))
+  }
+  const endDrag = () => {
+    dragRef.current.active = false
+  }
+
+  const resetTransform = () => {
+    setScale(1)
+    setRot(0)
+    setTx(0)
+    setTy(0)
+  }
+
+  const exportPNG = async () => {
+    try {
+      const stage = stageRef.current
+      if (!stage) return
+      const baseImg = await loadImage(base.url)
+      const overImg = await loadImage(over.url)
+      const W = baseImg.naturalWidth
+      const H = baseImg.naturalHeight
+      const rect = stage.getBoundingClientRect()
+      const sx = W / rect.width
+      const c = document.createElement('canvas')
+      c.width = W
+      c.height = H
+      const ctx = c.getContext('2d')
+      if (!ctx) return
+      ctx.drawImage(baseImg, 0, 0, W, H)
+      ctx.save()
+      ctx.globalAlpha = mode === 'overlay' ? opacity : 1
+      if (mode === 'wipe') {
+        ctx.beginPath()
+        ctx.rect(0, 0, (W * wipe) / 100, H)
+        ctx.clip()
+      }
+      ctx.translate(W / 2 + tx * sx, H / 2 + ty * sx)
+      ctx.rotate((rot * Math.PI) / 180)
+      ctx.scale(scale, scale)
+      ctx.drawImage(overImg, -W / 2, -H / 2, W, H)
+      ctx.restore()
+      c.toBlob((b) => {
+        if (!b) return
+        const a = document.createElement('a')
+        a.href = URL.createObjectURL(b)
+        a.download = 'compare.png'
+        a.click()
+        URL.revokeObjectURL(a.href)
+        notify('画像を書き出しました')
+      }, 'image/png')
+    } catch {
+      notify('書き出しに失敗しました')
+    }
+  }
+
+  return (
+    <section>
+      <div className="pickers">
+        <label>
+          下の写真（基準）
+          <select value={baseId} onChange={(e) => setBaseId(e.target.value)}>
+            {photos.map((p) => (
+              <option key={p.id} value={p.id}>
+                {fmtDate(p.takenAt)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          上の写真（重ねる）
+          <select value={overId} onChange={(e) => setOverId(e.target.value)}>
+            {photos.map((p) => (
+              <option key={p.id} value={p.id}>
+                {fmtDate(p.takenAt)}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+
+      <div
+        className="stage"
+        ref={stageRef}
+        style={baseNat ? { aspectRatio: `${baseNat.w} / ${baseNat.h}` } : undefined}
+      >
+        <img
+          src={base.url}
+          alt=""
+          className="stage-img"
+          draggable={false}
+          onLoad={(e) =>
+            setBaseNat({ w: e.currentTarget.naturalWidth, h: e.currentTarget.naturalHeight })
+          }
+        />
+        <div
+          className="stage-over"
+          style={{
+            opacity: effOpacity,
+            clipPath: mode === 'wipe' ? `inset(0 ${100 - wipe}% 0 0)` : undefined,
+            transform: `translate(${tx}px, ${ty}px) scale(${scale}) rotate(${rot}deg)`,
+          }}
+          onPointerDown={onPointerDown}
+          onPointerMove={onPointerMove}
+          onPointerUp={endDrag}
+          onPointerCancel={endDrag}
+        >
+          <img src={over.url} alt="" className="stage-img" draggable={false} />
+        </div>
+        {mode === 'wipe' && <div className="wipe-line" style={{ left: `${wipe}%` }} />}
+      </div>
+      <p className="note">上の写真はドラッグで動かせます。おへそや腰の位置など、目印で合わせてください。</p>
+
+      <div className="chips">
+        <button className={mode === 'overlay' ? 'chip active' : 'chip'} onClick={() => setMode('overlay')}>
+          重ねる
+        </button>
+        <button className={mode === 'wipe' ? 'chip active' : 'chip'} onClick={() => setMode('wipe')}>
+          ワイプ
+        </button>
+        <button className={mode === 'flicker' ? 'chip active' : 'chip'} onClick={() => setMode('flicker')}>
+          フリッカー
+        </button>
+      </div>
+
+      {mode === 'overlay' && (
+        <div className="control">
+          <label>
+            透明度 <span>{Math.round(opacity * 100)}%</span>
+          </label>
+          <input
+            type="range"
+            min={0}
+            max={1}
+            step={0.05}
+            value={opacity}
+            onChange={(e) => setOpacity(Number(e.target.value))}
+          />
+        </div>
+      )}
+      {mode === 'wipe' && (
+        <div className="control">
+          <label>
+            境界 <span>{wipe}%</span>
+          </label>
+          <input
+            type="range"
+            min={0}
+            max={100}
+            step={1}
+            value={wipe}
+            onChange={(e) => setWipe(Number(e.target.value))}
+          />
+        </div>
+      )}
+      <div className="control">
+        <label>
+          大きさ <span>{scale.toFixed(2)}x</span>
+        </label>
+        <input
+          type="range"
+          min={0.5}
+          max={2}
+          step={0.01}
+          value={scale}
+          onChange={(e) => setScale(Number(e.target.value))}
+        />
+        <label>
+          回転 <span>{rot.toFixed(1)}°</span>
+        </label>
+        <input
+          type="range"
+          min={-30}
+          max={30}
+          step={0.5}
+          value={rot}
+          onChange={(e) => setRot(Number(e.target.value))}
+        />
+      </div>
+      <div className="btn-row">
+        <button className="sub-btn" onClick={resetTransform}>
+          位置をリセット
+        </button>
+        <button className="sub-btn" onClick={exportPNG}>
+          この状態を画像で保存
+        </button>
+      </div>
+    </section>
+  )
+}
+
+// ---------- 一覧・設定 ----------
+
+function ListView({
+  photos,
+  settings,
+  onSettings,
+  onChanged,
+}: {
+  photos: PhotoItem[]
+  settings: Settings
+  onSettings: (s: Settings) => void
+  onChanged: () => Promise<void>
+}) {
+  const last = photos[photos.length - 1]
+  const next = last ? nextDueAt(last.takenAt, settings.cadence) : null
+  const now = Date.now()
+
+  const remove = async (p: PhotoItem) => {
+    if (!window.confirm(`${fmtDate(p.takenAt)} の写真を削除しますか？`)) return
+    await deletePhoto(p.id)
+    await onChanged()
+  }
+
+  return (
+    <section>
+      <div className="card">
+        <h2>設定</h2>
+        <label className="field">
+          撮影ペース
+          <select
+            value={settings.cadence}
+            onChange={(e) => onSettings({ ...settings, cadence: e.target.value as Cadence })}
+          >
+            <option value="weekly">週に1回</option>
+            <option value="monthly">月に1回</option>
+            <option value="free">自由（目安なし）</option>
+          </select>
+        </label>
+        <label className="field">
+          出産予定日（週数ラベル用・任意）
+          <input
+            type="date"
+            value={settings.dueDate}
+            onChange={(e) => onSettings({ ...settings, dueDate: e.target.value })}
+          />
+        </label>
+        {last && (
+          <p className="note">
+            前回の撮影：{fmtDate(last.takenAt)}（{daysSince(last.takenAt, now)}日前）
+            {next &&
+              (now >= next ? (
+                <>
+                  <br />
+                  そろそろ次の撮影の頃です。
+                </>
+              ) : (
+                <>
+                  <br />
+                  次の目安：{fmtDate(next)}
+                </>
+              ))}
+          </p>
+        )}
+      </div>
+
+      <h2 className="list-title">写真一覧（{photos.length}枚）</h2>
+      {photos.length === 0 && <p className="note">まだ写真がありません。</p>}
+      <div className="grid">
+        {photos.map((p, i) => {
+          const g = gestationalLabel(p.takenAt, settings.dueDate)
+          const prev = photos[i - 1]
+          return (
+            <figure key={p.id} className="cell">
+              <img src={p.url} alt={fmtDate(p.takenAt)} />
+              <figcaption>
+                <span>{fmtDate(p.takenAt)}</span>
+                {g && <span className="badge">{g}</span>}
+                <span className="cell-sub">
+                  {prev ? `前回から${daysSince(prev.takenAt, p.takenAt)}日` : '1枚目'}
+                </span>
+                <button className="del" onClick={() => remove(p)}>
+                  削除
+                </button>
+              </figcaption>
+            </figure>
+          )
+        })}
+      </div>
+    </section>
+  )
+}
