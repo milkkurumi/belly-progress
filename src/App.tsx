@@ -19,6 +19,7 @@ type Cadence = 'weekly' | 'monthly' | 'free'
 interface Settings {
   cadence: Cadence
   dueDate: string // 'YYYY-MM-DD' or ''
+  autoSaveLocal: boolean
 }
 
 const SETTINGS_KEY = 'belly-progress-settings'
@@ -31,12 +32,25 @@ function loadSettings(): Settings {
       return {
         cadence: p.cadence === 'monthly' || p.cadence === 'free' ? p.cadence : 'weekly',
         dueDate: typeof p.dueDate === 'string' ? p.dueDate : '',
+        autoSaveLocal: p.autoSaveLocal === true,
       }
     }
   } catch {
     // ignore
   }
-  return { cadence: 'weekly', dueDate: '' }
+  return { cadence: 'weekly', dueDate: '', autoSaveLocal: false }
+}
+
+/** 写真を端末のダウンロードフォルダへ保存する（外部送信はしない） */
+function downloadPhoto(blob: Blob, takenAt: number) {
+  const d = new Date(takenAt)
+  const p = (n: number) => String(n).padStart(2, '0')
+  const ext = blob.type.includes('png') ? 'png' : 'jpg'
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(blob)
+  a.download = `belly-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}.${ext}`
+  a.click()
+  URL.revokeObjectURL(a.href)
 }
 
 const DAY = 86400000
@@ -127,7 +141,9 @@ export default function App() {
       </header>
 
       <main className="main">
-        {tab === 'shoot' && <ShootView photos={photos} onChanged={reload} notify={notify} />}
+        {tab === 'shoot' && (
+          <ShootView photos={photos} onChanged={reload} notify={notify} settings={settings} />
+        )}
         {tab === 'compare' && <CompareView photos={photos} notify={notify} />}
         {tab === 'list' && (
           <ListView
@@ -163,10 +179,12 @@ function ShootView({
   photos,
   onChanged,
   notify,
+  settings,
 }: {
   photos: PhotoItem[]
   onChanged: () => Promise<void>
   notify: (m: string) => void
+  settings: Settings
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
@@ -221,7 +239,9 @@ function ShootView({
     c.toBlob(
       async (b) => {
         if (!b) return
-        await addPhoto(b, Date.now())
+        const ts = Date.now()
+        await addPhoto(b, ts)
+        if (settings.autoSaveLocal) downloadPhoto(b, ts)
         notify('保存しました')
         await onChanged()
       },
@@ -636,6 +656,14 @@ function ListView({
             onChange={(e) => onSettings({ ...settings, dueDate: e.target.value })}
           />
         </label>
+        <label className="field check">
+          <input
+            type="checkbox"
+            checked={settings.autoSaveLocal}
+            onChange={(e) => onSettings({ ...settings, autoSaveLocal: e.target.checked })}
+          />
+          アプリで撮影したら、端末のダウンロードフォルダにも保存する
+        </label>
         {last && (
           <p className="note">
             前回の撮影：{fmtDate(last.takenAt)}（{daysSince(last.takenAt, now)}日前）
@@ -708,6 +736,9 @@ function ListView({
                   </span>
                 ) : (
                   <>
+                    <button className="save-btn" onClick={() => downloadPhoto(p.blob, p.takenAt)}>
+                      端末に保存
+                    </button>
                     <button className="edit-btn" onClick={() => startEdit(p)}>
                       日付変更
                     </button>
