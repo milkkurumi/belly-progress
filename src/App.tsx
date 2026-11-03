@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { addPhoto, deletePhoto, listPhotos, type PhotoRecord } from './lib/db'
+import {
+  addPhoto,
+  deletePhoto,
+  listPhotos,
+  updatePhotoTakenAt,
+  type PhotoRecord,
+} from './lib/db'
+import { readPhotoDate } from './lib/photoDate'
+import { exportBackup, importBackup } from './lib/backup'
 
 export interface PhotoItem extends PhotoRecord {
   url: string
@@ -89,6 +97,12 @@ export default function App() {
 
   useEffect(() => {
     void reload()
+    // ブラウザに「消さないでほしいデータ」として保持を要求する（自動削除の抑止）
+    try {
+      void navigator.storage?.persist?.()
+    } catch {
+      // ignore
+    }
   }, [reload])
 
   useEffect(() => {
@@ -116,7 +130,13 @@ export default function App() {
         {tab === 'shoot' && <ShootView photos={photos} onChanged={reload} notify={notify} />}
         {tab === 'compare' && <CompareView photos={photos} notify={notify} />}
         {tab === 'list' && (
-          <ListView photos={photos} settings={settings} onSettings={setSettings} onChanged={reload} />
+          <ListView
+            photos={photos}
+            settings={settings}
+            onSettings={setSettings}
+            onChanged={reload}
+            notify={notify}
+          />
         )}
       </main>
 
@@ -215,7 +235,7 @@ function ShootView({
     e.target.value = ''
     if (files.length === 0) return
     for (const f of files) {
-      await addPhoto(f, f.lastModified || Date.now())
+      await addPhoto(f, await readPhotoDate(f))
     }
     notify(files.length > 1 ? `${files.length}枚追加しました` : '追加しました')
     await onChanged()
@@ -525,20 +545,72 @@ function ListView({
   settings,
   onSettings,
   onChanged,
+  notify,
 }: {
   photos: PhotoItem[]
   settings: Settings
   onSettings: (s: Settings) => void
   onChanged: () => Promise<void>
+  notify: (m: string) => void
 }) {
   const last = photos[photos.length - 1]
   const next = last ? nextDueAt(last.takenAt, settings.cadence) : null
   const now = Date.now()
+  const [editingId, setEditingId] = useState<string>('')
+  const [editDate, setEditDate] = useState<string>('')
+  const [backupBusy, setBackupBusy] = useState(false)
+  const restoreRef = useRef<HTMLInputElement | null>(null)
 
   const remove = async (p: PhotoItem) => {
     if (!window.confirm(`${fmtDate(p.takenAt)} の写真を削除しますか？`)) return
     await deletePhoto(p.id)
     await onChanged()
+  }
+
+  const startEdit = (p: PhotoItem) => {
+    const d = new Date(p.takenAt)
+    const pad = (n: number) => String(n).padStart(2, '0')
+    setEditDate(`${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`)
+    setEditingId(p.id)
+  }
+
+  const saveEdit = async (p: PhotoItem) => {
+    if (!editDate) return
+    const ts = new Date(`${editDate}T12:00:00`).getTime()
+    if (Number.isNaN(ts)) return
+    await updatePhotoTakenAt(p.id, ts)
+    setEditingId('')
+    notify('日付を変更しました')
+    await onChanged()
+  }
+
+  const doExport = async () => {
+    if (photos.length === 0) return
+    setBackupBusy(true)
+    try {
+      const n = await exportBackup()
+      notify(`${n}枚をZIPに書き出しました`)
+    } catch {
+      notify('書き出しに失敗しました')
+    } finally {
+      setBackupBusy(false)
+    }
+  }
+
+  const onRestore = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0]
+    e.target.value = ''
+    if (!f) return
+    setBackupBusy(true)
+    try {
+      const r = await importBackup(f)
+      notify(`復元しました（追加 ${r.added}枚／既にある ${r.skipped}枚はスキップ）`)
+      await onChanged()
+    } catch {
+      notify('復元に失敗しました。バックアップZIPを選んでください')
+    } finally {
+      setBackupBusy(false)
+    }
   }
 
   return (
@@ -583,6 +655,28 @@ function ListView({
         )}
       </div>
 
+      <div className="card card-spaced">
+        <h2>バックアップ</h2>
+        <p className="note">
+          写真はこの端末のブラウザ内にだけあります。ときどきZIPで書き出して、端末の好きな場所（プライベートアルバムやPCなど）に保管しておくと、ブラウザのデータを消しても復元できます。書き出し・復元とも、外部に送信はされません。
+        </p>
+        <div className="btn-row">
+          <button className="sub-btn" onClick={doExport} disabled={backupBusy || photos.length === 0}>
+            全写真をZIPで書き出す
+          </button>
+          <button className="sub-btn" onClick={() => restoreRef.current?.click()} disabled={backupBusy}>
+            バックアップから復元
+          </button>
+        </div>
+        <input
+          ref={restoreRef}
+          type="file"
+          accept=".zip,application/zip"
+          hidden
+          onChange={onRestore}
+        />
+      </div>
+
       <h2 className="list-title">写真一覧（{photos.length}枚）</h2>
       {photos.length === 0 && <p className="note">まだ写真がありません。</p>}
       <div className="grid">
@@ -598,9 +692,30 @@ function ListView({
                 <span className="cell-sub">
                   {prev ? `前回から${daysSince(prev.takenAt, p.takenAt)}日` : '1枚目'}
                 </span>
-                <button className="del" onClick={() => remove(p)}>
-                  削除
-                </button>
+                {editingId === p.id ? (
+                  <span className="date-edit">
+                    <input
+                      type="date"
+                      value={editDate}
+                      onChange={(e) => setEditDate(e.target.value)}
+                    />
+                    <button className="mini-btn" onClick={() => saveEdit(p)}>
+                      保存
+                    </button>
+                    <button className="mini-btn" onClick={() => setEditingId('')}>
+                      取消
+                    </button>
+                  </span>
+                ) : (
+                  <>
+                    <button className="edit-btn" onClick={() => startEdit(p)}>
+                      日付変更
+                    </button>
+                    <button className="del" onClick={() => remove(p)}>
+                      削除
+                    </button>
+                  </>
+                )}
               </figcaption>
             </figure>
           )
