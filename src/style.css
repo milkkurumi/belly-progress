@@ -78,6 +78,80 @@ body {
   line-height: 1.5;
 }
 
+.vf-grid {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.gl-v {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: rgba(255, 255, 255, 0.55);
+}
+
+.gl-h {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: rgba(255, 255, 255, 0.55);
+}
+
+.vf-count {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 96px;
+  font-weight: 800;
+  color: #fff;
+  text-shadow: 0 2px 16px rgba(0, 0, 0, 0.6);
+  pointer-events: none;
+}
+
+.vf-tools {
+  margin-top: 12px;
+}
+
+.guide-card {
+  margin-bottom: 14px;
+}
+
+.guide-steps {
+  margin: 6px 0 2px;
+  padding-left: 20px;
+  font-size: 14px;
+  line-height: 1.8;
+  color: var(--ink);
+}
+
+.lastshot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 10px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 8px 12px 8px 8px;
+  font-size: 13px;
+}
+
+.lastshot img {
+  width: 44px;
+  height: 56px;
+  object-fit: cover;
+  border-radius: 8px;
+}
+
+.lastshot .mini-btn {
+  margin-left: auto;
+}
+
 .shutter {
   display: block;
   width: 100%;
