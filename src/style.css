@@ -292,12 +292,51 @@ input[type='range'] {
 }
 
 .del {
-  margin-left: auto;
+  margin-left: 10px;
   border: none;
   background: none;
   color: #b3553f;
   font-size: 12px;
   padding: 4px 0;
+}
+
+.edit-btn {
+  margin-left: auto;
+  border: none;
+  background: none;
+  color: var(--sub);
+  font-size: 12px;
+  padding: 4px 0;
+}
+
+.date-edit {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  width: 100%;
+}
+
+.date-edit input {
+  flex: 1;
+  padding: 6px;
+  font-size: 13px;
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  min-width: 0;
+}
+
+.mini-btn {
+  border: 1px solid var(--line);
+  background: var(--card);
+  color: var(--ink);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+}
+
+.card-spaced {
+  margin-top: 14px;
 }
 
 /* 共通 */
