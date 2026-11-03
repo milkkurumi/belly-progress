@@ -300,13 +300,37 @@ input[type='range'] {
   padding: 4px 0;
 }
 
-.edit-btn {
+.save-btn {
   margin-left: auto;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 700;
+  padding: 4px 0;
+}
+
+.edit-btn {
+  margin-left: 10px;
   border: none;
   background: none;
   color: var(--sub);
   font-size: 12px;
   padding: 4px 0;
+}
+
+.field.check {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  color: var(--ink);
+  font-size: 14px;
+}
+
+.field.check input {
+  width: 20px;
+  height: 20px;
+  accent-color: var(--accent);
 }
 
 .date-edit {
