@@ -78,6 +78,30 @@ body {
   line-height: 1.5;
 }
 
+.vf-error p {
+  margin: 0;
+}
+
+.err-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+.err-actions a {
+  text-decoration: none;
+  display: inline-block;
+}
+
+.cam-primary {
+  margin-top: 0;
+}
+
+.cam-primary-note {
+  margin-top: -4px;
+}
+
 .vf-grid {
   position: absolute;
   inset: 0;
