@@ -189,7 +189,10 @@ function ShootView({
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
   const fileRef = useRef<HTMLInputElement | null>(null)
-  const [camError, setCamError] = useState<string | null>(null)
+  const camInputRef = useRef<HTMLInputElement | null>(null)
+  type CamErrKind = 'denied' | 'unsupported' | 'busy' | 'other'
+  const [camErrKind, setCamErrKind] = useState<CamErrKind | null>(null)
+  const [retryKey, setRetryKey] = useState(0)
   const [ghostId, setGhostId] = useState<string>('') // '' = 前回（最新）
   const [ghostOpacity, setGhostOpacity] = useState(0.45)
   const [facing, setFacing] = useState<'environment' | 'user'>('environment')
@@ -203,27 +206,40 @@ function ShootView({
 
   useEffect(() => {
     let cancelled = false
-    setCamError(null)
+    setCamErrKind(null)
     async function start() {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        // アプリ内ブラウザ等ではカメラAPI自体が無い
+        if (!cancelled) setCamErrKind('unsupported')
+        return
+      }
+      let stream: MediaStream
       try {
-        if (!navigator.mediaDevices?.getUserMedia) throw new Error('unsupported')
-        const stream = await navigator.mediaDevices.getUserMedia({
+        stream = await navigator.mediaDevices.getUserMedia({
           video: { facingMode: { ideal: facing } },
           audio: false,
         })
-        if (cancelled) {
-          stream.getTracks().forEach((t) => t.stop())
+      } catch (e1) {
+        const name1 = e1 instanceof DOMException ? e1.name : ''
+        if (name1 === 'OverconstrainedError' || name1 === 'NotFoundError') {
+          // 希望のカメラが無い端末では素の指定で再試行する
+          try {
+            stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false })
+          } catch (e2) {
+            if (!cancelled) setCamErrKind(classifyCamError(e2))
+            return
+          }
+        } else {
+          if (!cancelled) setCamErrKind(classifyCamError(e1))
           return
         }
-        streamRef.current = stream
-        if (videoRef.current) videoRef.current.srcObject = stream
-      } catch {
-        if (!cancelled) {
-          setCamError(
-            'ブラウザ内でカメラを起動できませんでした。下の「ギャラリー／カメラアプリから選ぶ」から追加できます。',
-          )
-        }
       }
+      if (cancelled) {
+        stream.getTracks().forEach((t) => t.stop())
+        return
+      }
+      streamRef.current = stream
+      if (videoRef.current) videoRef.current.srcObject = stream
     }
     void start()
     return () => {
@@ -231,7 +247,15 @@ function ShootView({
       streamRef.current?.getTracks().forEach((t) => t.stop())
       streamRef.current = null
     }
-  }, [facing])
+  }, [facing, retryKey])
+
+  const classifyCamError = (e: unknown): CamErrKind => {
+    const name = e instanceof DOMException ? e.name : ''
+    if (name === 'NotAllowedError' || name === 'SecurityError') return 'denied'
+    if (name === 'NotReadableError' || name === 'AbortError') return 'busy'
+    if (name === 'NotFoundError' || name === 'OverconstrainedError') return 'other'
+    return 'other'
+  }
 
   const doCapture = () => {
     const v = videoRef.current
@@ -316,6 +340,14 @@ function ShootView({
         </div>
       )}
 
+      <button className="shutter cam-primary" onClick={() => camInputRef.current?.click()}>
+        📷 カメラで撮る
+      </button>
+      <p className="note cam-primary-note">
+        いつものカメラアプリが開きます。撮った写真はそのまま、このアプリに保存されます。
+      </p>
+      <input ref={camInputRef} type="file" accept="image/*" capture="environment" hidden onChange={onFile} />
+
       <div className="viewfinder">
         <video
           ref={videoRef}
@@ -335,8 +367,43 @@ function ShootView({
           </div>
         )}
         {countdown !== null && countdown > 0 && <div className="vf-count">{countdown}</div>}
-        {camError && <div className="vf-error">{camError}</div>}
+        {camErrKind && (
+          <div className="vf-error">
+            {camErrKind === 'denied' && (
+              <p>
+                ゴースト撮影にはカメラの許可が必要です。アドレスバー左のアイコン→「権限」→カメラを「許可」にしてください。許可しなくても、上の「カメラで撮る」から撮影できます。
+              </p>
+            )}
+            {camErrKind === 'unsupported' && (
+              <p>
+                このブラウザではゴースト撮影が使えません（アプリ内ブラウザではカメラが開けないことがあります）。Chromeで開くと使えます。上の「カメラで撮る」からでも撮影できます。
+              </p>
+            )}
+            {camErrKind === 'busy' && (
+              <p>
+                カメラが他のアプリで使用中のようです。他のカメラアプリを閉じてから、もう一度試してください。上の「カメラで撮る」からでも撮影できます。
+              </p>
+            )}
+            {camErrKind === 'other' && (
+              <p>ゴースト撮影のカメラを起動できませんでした。上の「カメラで撮る」から撮影できます。</p>
+            )}
+            <div className="err-actions">
+              <button className="mini-btn" onClick={() => setRetryKey((k) => k + 1)}>
+                もう一度試す
+              </button>
+              {camErrKind === 'unsupported' && (
+                <a
+                  className="mini-btn"
+                  href="intent://belly-progress.vercel.app/#Intent;scheme=https;package=com.android.chrome;action=android.intent.action.VIEW;end"
+                >
+                  Chromeで開く
+                </a>
+              )}
+            </div>
+          </div>
+        )}
       </div>
+      <p className="note">↑ 前回の写真を重ねて撮る「ゴースト撮影」はここから（Chrome推奨）</p>
 
       <div className="chips vf-tools">
         <button className="chip" onClick={() => setFacing((f) => (f === 'environment' ? 'user' : 'environment'))}>
@@ -389,8 +456,8 @@ function ShootView({
         <p className="note">まだ写真がありません。1枚目を撮ると、次回からゴーストで重ねて撮れます。</p>
       )}
 
-      <button className="shutter" onClick={capture} disabled={!!camError || countdown !== null}>
-        {countdown !== null ? `${countdown}…` : '● 撮影する'}
+      <button className="shutter" onClick={capture} disabled={camErrKind !== null || countdown !== null}>
+        {countdown !== null ? `${countdown}…` : '● ゴーストで撮影する'}
       </button>
 
       {lastShot && (
@@ -404,7 +471,7 @@ function ShootView({
       )}
 
       <button className="sub-btn" onClick={() => fileRef.current?.click()}>
-        ギャラリー／カメラアプリから選ぶ（複数OK）
+        ギャラリーから選ぶ（複数OK）
       </button>
       <input ref={fileRef} type="file" accept="image/*" multiple hidden onChange={onFile} />
 
